@@ -53,6 +53,34 @@
       console.warn('Tesseract not loaded');
       return '';
     };
+
+    // split the image blob vertically into `parts` pieces and run OCR on each.
+    // returns an array of text strings in order.
+    window.recognizeImageSegments = async function(blob, parts) {
+      if (typeof Tesseract === 'undefined') {
+        console.warn('Tesseract not loaded (segments)');
+        return [];
+      }
+      const img = await createImageBitmap(blob);
+      const { width, height } = img;
+      const segmentWidth = Math.floor(width / parts);
+      const results = [];
+      const canvas = new OffscreenCanvas(segmentWidth, height);
+      const ctx = canvas.getContext('2d');
+      for (let i = 0; i < parts; i++) {
+        ctx.clearRect(0, 0, segmentWidth, height);
+        ctx.drawImage(img, i * segmentWidth, 0, segmentWidth, height, 0, 0, segmentWidth, height);
+        const segBlob = await canvas.convertToBlob({ type: 'image/png' });
+        try {
+          const { data: { text } } = await Tesseract.recognize(segBlob, 'kor');
+          results.push(text);
+        } catch (e) {
+          console.error('segment OCR error', e);
+          results.push('');
+        }
+      }
+      return results;
+    };
   </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
