@@ -33,6 +33,18 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <!-- include tesseract.js from CDN for OCR (optional) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+  <script>
+    // placeholder JS interop: accepts Blob and returns recognized text
+    window.recognizeImage = async function(blob) {
+      if (typeof Tesseract !== 'undefined') {
+        const { data: { text } } = await Tesseract.recognize(blob, 'kor');
+        return text;
+      }
+      return '';
+    };
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
