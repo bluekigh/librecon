@@ -2,6 +2,13 @@ import 'dart:async';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+// web OCR helpers
+import 'web_ocr.dart' as webocr;
+// video element access (only on web)
+// ignore: avoid_web_libraries_in_flutter
+import 'dart:html' as html;
 
 /// A simple full‑screen camera preview with a semi‑transparent overlay
 /// containing a horizontal scan guide box at the center.  The area inside
@@ -17,10 +24,34 @@ class _ScannerScreenState extends State<ScannerScreen> {
   CameraController? _controller;
   Future<void>? _initializeControllerFuture;
 
+  // 인식된 텍스트 라인들을 저장
+  final List<String> _recognizedLines = [];
+  // 원본 OCR 텍스트 (디버그)
+  String _lastRawText = '';
+  Timer? _ocrTimer;
+  String _ocrStatus = '대기 중';
+  // 빌드 버전 - dart define으로 주입됨
+  static const String buildVersion = String.fromEnvironment('BUILD_VERSION', defaultValue: '0');
+
   @override
   void initState() {
     super.initState();
+    // allow both orientations so landscape works
+    // ignore: prefer_const_constructors
+    SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+
     _initCamera();
+    // 주기적으로 OCR 처리
+    _ocrTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (mounted) {
+        _performOcr();
+      }
+    });
   }
 
   Future<void> _initCamera() async {
@@ -42,8 +73,57 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   @override
   void dispose() {
+    _ocrTimer?.cancel();
     _controller?.dispose();
     super.dispose();
+  }
+
+  // placeholder for future OCR capture logic
+  Future<void> _performOcr() async {
+    if (!kIsWeb) return; // 웹 전용
+    try {
+      setState(() {
+        _ocrStatus = '인식 중...';
+      });
+      final list = html.document.getElementsByTagName('video');
+      if (list.isEmpty) {
+        setState(() => _ocrStatus = '비디오 없음');
+        return;
+      }
+      final video = list.first as html.VideoElement;
+
+      final width = video.videoWidth?.toDouble() ?? 0;
+      final height = video.videoHeight?.toDouble() ?? 0;
+      if (width == 0 || height == 0) {
+        setState(() => _ocrStatus = '영상 크기 오류');
+        return;
+      }
+
+      // ROI 계산 (same as painter proportions)
+      final boxWidth = width * 0.8;
+      final boxHeight = 150.0;
+      final left = (width - boxWidth) / 2;
+      final top = (height - boxHeight) / 2;
+
+      final blob = await webocr.captureCroppedFrame(
+          video, webocr.BoundingBox(left, top, boxWidth, boxHeight));
+      final text = await webocr.recognizeText(blob);
+      _lastRawText = text;
+      final lines = text
+          .split('\n')
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+      final filtered = webocr.filterKdc(lines);
+      setState(() {
+        _recognizedLines
+          ..clear()
+          ..addAll(filtered);
+        _ocrStatus = filtered.isEmpty ? '결과 없음' : '인식 완료';
+      });
+    } catch (e) {
+      setState(() => _ocrStatus = '오류');
+    }
   }
 
   @override
@@ -69,9 +149,77 @@ class _ScannerScreenState extends State<ScannerScreen> {
               const Center(child: CircularProgressIndicator()),
 
             // overlay with transparent window (using CustomPainter for flexibility)
-            const CustomPaint(
+            CustomPaint(
               painter: ScanGuidePainter(),
             ),
+            // status line
+            Positioned(
+              left: 0,
+              right: 0,
+              top: 0,
+              child: Container(
+                color: Colors.black45,
+                padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+                child: Text(
+                  _ocrStatus,
+                  style: const TextStyle(color: Colors.white),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+          // bottom panel with recognized text (shown only when lines present)
+          if (_recognizedLines.isNotEmpty)
+            Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: Container(
+                color: Colors.black54,
+                padding: const EdgeInsets.all(8),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ..._recognizedLines.map((s) => Text(
+                          s,
+                          style: const TextStyle(color: Colors.white),
+                        )),
+                    const Divider(color: Colors.white),
+                    Text(
+                      'Raw: $_lastRawText',
+                      style: const TextStyle(color: Colors.white70, fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          // always show raw text in small overlay bottom-right
+          if (_lastRawText.isNotEmpty)
+            Positioned(
+              right: 4,
+              bottom: 4,
+              child: Container(
+                color: Colors.black45,
+                padding: const EdgeInsets.all(4),
+                child: Text(
+                  _lastRawText,
+                  style: const TextStyle(color: Colors.white70, fontSize: 10),
+                ),
+              ),
+            ),
+          // build version badge
+          Positioned(
+            right: 8,
+            top: 8,
+            child: Container(
+              color: Colors.black45,
+              padding: const EdgeInsets.all(4),
+              child: Text(
+                'v${buildVersion}',
+                style: const TextStyle(color: Colors.white70, fontSize: 10),
+              ),
+            ),
+          ),
           ],
         ),
       ),
@@ -137,7 +285,8 @@ final RegExp kdcRegex = RegExp(r"^\d{1,3}(?:\.\d+)?-[가-힣]\d+-[\w\.]+$");
 
 /// Sorts a list of recognised call numbers paired with their x-coordinates
 /// and returns `true` if the sequence is nondecreasing in call-number order.
-bool checkOrdering(List<_TextWithPosition> items) {
+/// (Internal helper.)
+bool _checkOrdering(List<_TextWithPosition> items) {
   if (items.isEmpty) return true;
   // Sort by x coordinate first
   items.sort((a, b) => a.x.compareTo(b.x));
