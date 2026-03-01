@@ -38,10 +38,19 @@
   <script>
     // placeholder JS interop: accepts Blob and returns recognized text
     window.recognizeImage = async function(blob) {
+      console.log('recognizeImage called');
       if (typeof Tesseract !== 'undefined') {
-        const { data: { text } } = await Tesseract.recognize(blob, 'kor');
-        return text;
+        console.log('Tesseract available, starting recognition');
+        try {
+          const { data: { text } } = await Tesseract.recognize(blob, 'kor');
+          console.log('OCR result:', text);
+          return text;
+        } catch (err) {
+          console.error('OCR error', err);
+          return '';
+        }
       }
+      console.warn('Tesseract not loaded');
       return '';
     };
   </script>
