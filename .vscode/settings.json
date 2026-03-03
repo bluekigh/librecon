@@ -1,0 +1,8 @@
+{
+  "chat.tools.terminal.autoApprove": {
+    "/^cd '/Users/blueligh/Downloads/Flutter Projects/librecon' && flutter build web --base-href \"/librecon/\"$/": {
+      "approve": true,
+      "matchCommandLine": true
+    }
+  }
+}

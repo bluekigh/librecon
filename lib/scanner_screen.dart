@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:ui' as ui;
+import 'dart:typed_data';
 
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
@@ -6,9 +8,9 @@ import 'package:flutter/services.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 // web OCR helpers
 import 'web_ocr.dart' as webocr;
-// video element access (only on web)
-// ignore: avoid_web_libraries_in_flutter
-import 'dart:html' as html;
+
+// image package for cropping/decoding (add to pubspec.yaml dependencies)
+import 'package:image/image.dart' as img;
 
 /// A simple full‑screen camera preview with a semi‑transparent overlay
 /// containing a horizontal scan guide box at the center.  The area inside
@@ -31,19 +33,17 @@ class _ScannerScreenState extends State<ScannerScreen> {
   Timer? _ocrTimer;
   String _ocrStatus = '대기 중';
   // 빌드 버전 - dart define으로 주입됨
-  static const String buildVersion = String.fromEnvironment('BUILD_VERSION', defaultValue: '0');
+  static const String buildVersion = String.fromEnvironment(
+    'BUILD_VERSION',
+    defaultValue: '0',
+  );
 
   @override
   void initState() {
     super.initState();
-    // allow both orientations so landscape works
-    // ignore: prefer_const_constructors
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    // Note: Flutter web cannot force device orientation; users must rotate
+    // their phones manually.  The layout is already responsive, so camera
+    // preview and overlays adapt automatically.
 
     _initCamera();
     // 주기적으로 OCR 처리
@@ -71,6 +71,58 @@ class _ScannerScreenState extends State<ScannerScreen> {
     if (mounted) setState(() {});
   }
 
+  /// Returns a cropped image byte array representing only the central guide
+  /// box.  This method takes a still picture from the camera controller,
+  /// decodes it, and crops it according to the same proportions used for the
+  /// on-screen scan guide.  The resulting PNG bytes are suitable for feeding
+  /// directly into an OCR engine.
+  Future<Uint8List?> captureCroppedPreview() async {
+    if (_controller == null || !_controller!.value.isInitialized) return null;
+    // takePicture is somewhat heavy but gives us a full-resolution frame that
+    // we can crop.  Alternative implementations could use the image stream.
+    final xfile = await _controller!.takePicture();
+    final bytes = await xfile.readAsBytes();
+
+    final decoded = img.decodeImage(bytes);
+    if (decoded == null) return null;
+    final roi = _calculateRoi(
+      decoded.width.toDouble(),
+      decoded.height.toDouble(),
+    );
+    var cropped = img.copyCrop(
+      decoded,
+      roi.left.toInt(),
+      roi.top.toInt(),
+      roi.width.toInt(),
+      roi.height.toInt(),
+    );
+
+    // apply preprocessing: grayscale + contrast boost
+    cropped = _preprocessImage(cropped);
+
+    return Uint8List.fromList(img.encodePng(cropped));
+  }
+
+  /// Compute the region of interest rectangle corresponding to the middle
+  /// guide box used in the UI.  Dimensions are expressed in pixels of the
+  /// underlying image.
+  Rect _calculateRoi(double imageWidth, double imageHeight) {
+    final boxWidth = imageWidth * 0.8;
+    const boxHeight = 150.0;
+    final left = (imageWidth - boxWidth) / 2;
+    final top = (imageHeight - boxHeight) / 2;
+    return Rect.fromLTWH(left, top, boxWidth, boxHeight);
+  }
+
+  /// Convert [img] to grayscale and increase contrast.
+  img.Image _preprocessImage(img.Image source) {
+    // Convert to grayscale (modifies the image in-place)
+    img.grayscale(source);
+    // Increase contrast. The contrast filter creates a new image.
+    // A value of 100 is normal, > 100 increases contrast. We use 150 for a 50% boost.
+    return img.contrast(source, contrast: 150);
+  }
+
   @override
   void dispose() {
     _ocrTimer?.cancel();
@@ -80,40 +132,41 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
   // placeholder for future OCR capture logic
   Future<void> _performOcr() async {
-    if (!kIsWeb) return; // 웹 전용
+    setState(() {
+      _ocrStatus = '인식 중...';
+    });
+
+    if (!kIsWeb) {
+      // non-web platforms: use our cropping helper to get a PNG of the guide
+      // box and then feed it into whatever OCR engine is appropriate (e.g.,
+      // ML Kit).  For now we merely log the size of the cropped image.
+      try {
+        final cropped = await captureCroppedPreview();
+        if (cropped == null) {
+          setState(() => _ocrStatus = '크롭 실패');
+          return;
+        }
+        // TODO: convert `cropped` to an InputImage and run ML Kit.
+        // ignore: avoid_print
+        print('cropped size: ${cropped.lengthInBytes} bytes');
+      } catch (e) {
+        setState(() => _ocrStatus = '오류');
+      }
+      return;
+    }
+
     try {
-      setState(() {
-        _ocrStatus = '인식 중...';
-      });
-      final list = html.document.getElementsByTagName('video');
-      if (list.isEmpty) {
-        setState(() => _ocrStatus = '비디오 없음');
-        return;
-      }
-      final video = list.first as html.VideoElement;
+      final segments = await webocr.recognizeWebVideo();
 
-      final width = video.videoWidth?.toDouble() ?? 0;
-      final height = video.videoHeight?.toDouble() ?? 0;
-      if (width == 0 || height == 0) {
-        setState(() => _ocrStatus = '영상 크기 오류');
-        return;
-      }
-
-      // ROI 계산 (same as painter proportions)
-      final boxWidth = width * 0.8;
-      final boxHeight = 150.0;
-      final left = (width - boxWidth) / 2;
-      final top = (height - boxHeight) / 2;
-
-      final blob = await webocr.captureCroppedFrame(
-          video, webocr.BoundingBox(left, top, boxWidth, boxHeight));
-      final text = await webocr.recognizeText(blob);
-      _lastRawText = text;
-      final lines = text
-          .split('\n')
-          .map((s) => s.trim())
+      // build a simple raw string for debugging
+      _lastRawText = segments.map((r) => r.text).join('\n');
+      final lines = segments
+          .map((r) => r.text.trim())
           .where((s) => s.isNotEmpty)
           .toList();
+      // debug print all lines with coordinates
+      // ignore: avoid_print
+      print('ocr segments: $segments');
       final filtered = webocr.filterKdc(lines);
       setState(() {
         _recognizedLines
@@ -149,9 +202,7 @@ class _ScannerScreenState extends State<ScannerScreen> {
               const Center(child: CircularProgressIndicator()),
 
             // overlay with transparent window (using CustomPainter for flexibility)
-            CustomPaint(
-              painter: ScanGuidePainter(),
-            ),
+            CustomPaint(painter: ScanGuidePainter()),
             // status line
             Positioned(
               left: 0,
@@ -167,34 +218,38 @@ class _ScannerScreenState extends State<ScannerScreen> {
                 ),
               ),
             ),
-          // bottom panel with recognized text (shown only when lines present)
-          if (_recognizedLines.isNotEmpty)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: Container(
-                color: Colors.black54,
-                padding: const EdgeInsets.all(8),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    ..._recognizedLines.map((s) => Text(
+            // bottom panel with recognized text (shown only when lines present)
+            if (_recognizedLines.isNotEmpty)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: Container(
+                  color: Colors.black54,
+                  padding: const EdgeInsets.all(8),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      ..._recognizedLines.map(
+                        (s) => Text(
                           s,
                           style: const TextStyle(color: Colors.white),
-                        )),
-                    const Divider(color: Colors.white),
-                    Text(
-                      'Raw: $_lastRawText',
-                      style: const TextStyle(color: Colors.white70, fontSize: 10),
-                    ),
-                  ],
+                        ),
+                      ),
+                      const Divider(color: Colors.white),
+                      Text(
+                        'Raw: $_lastRawText',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-          // always show raw text in small overlay bottom-right
-          if (_lastRawText.isNotEmpty)
+            // always show raw text in small overlay bottom-right (even empty)
             Positioned(
               right: 4,
               bottom: 4,
@@ -202,31 +257,30 @@ class _ScannerScreenState extends State<ScannerScreen> {
                 color: Colors.black45,
                 padding: const EdgeInsets.all(4),
                 child: Text(
-                  _lastRawText,
+                  'Raw: $_lastRawText',
                   style: const TextStyle(color: Colors.white70, fontSize: 10),
                 ),
               ),
             ),
-          // build version badge
-          Positioned(
-            right: 8,
-            top: 8,
-            child: Container(
-              color: Colors.black45,
-              padding: const EdgeInsets.all(4),
-              child: Text(
-                'v${buildVersion}',
-                style: const TextStyle(color: Colors.white70, fontSize: 10),
+            // build version badge
+            Positioned(
+              right: 8,
+              top: 8,
+              child: Container(
+                color: Colors.black45,
+                padding: const EdgeInsets.all(4),
+                child: Text(
+                  'v${buildVersion}',
+                  style: const TextStyle(color: Colors.white70, fontSize: 10),
+                ),
               ),
             ),
-          ),
           ],
         ),
       ),
     );
   }
 }
-
 
 /// Painter that draws a translucent overlay with a clear horizontal
 /// guide rectangle centered on the screen. This works identically on web
@@ -257,65 +311,4 @@ class ScanGuidePainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
-}
-
-// -----------------------------------------------------------------------------
-// OCR & sorting helpers (web prototype stubs)
-//
-// In a web build we cannot use google_mlkit_text_recognition; instead we
-// capture the video frame, crop to the guide box, and send it to a JS
-// library such as tesseract.js via the helpers in web_ocr.dart.
-// The `BoundingBox` for the crop can be computed from the size of the
-// preview and the fixed proportions of the scan guide. Example:
-//
-//   final previewSize = Size(width, height);
-//   final roi = BoundingBox(
-//     (previewSize.width * 0.1),
-//     (previewSize.height - 150) / 2,
-//     previewSize.width * 0.8,
-//     150,
-//   );
-//
-// then call captureCroppedFrame(videoElement, roi) and feed the blob into
-// recognizeText().
-
-/// Example regular expression matching KDC call numbers such as
-/// "813.6-김24-가" or "700.12-박3-v.2".  Adjust as needed.
-final RegExp kdcRegex = RegExp(r"^\d{1,3}(?:\.\d+)?-[가-힣]\d+-[\w\.]+$");
-
-/// Sorts a list of recognised call numbers paired with their x-coordinates
-/// and returns `true` if the sequence is nondecreasing in call-number order.
-/// (Internal helper.)
-bool _checkOrdering(List<_TextWithPosition> items) {
-  if (items.isEmpty) return true;
-  // Sort by x coordinate first
-  items.sort((a, b) => a.x.compareTo(b.x));
-
-  // simple lexical comparison for now; replace with proper numeric/author logic
-  for (var i = 0; i < items.length - 1; i++) {
-    final current = items[i].text;
-    final next = items[i + 1].text;
-    if (_compareCallNumbers(current, next) > 0) {
-      return false;
-    }
-  }
-  return true;
-}
-
-/// Metadata holder
-class _TextWithPosition {
-  final String text;
-  final double x;
-  _TextWithPosition(this.text, this.x);
-}
-
-int _compareCallNumbers(String a, String b) {
-  // placeholder: split at '-' and compare numeric prefixes then rest
-  final pa = a.split('-');
-  final pb = b.split('-');
-  final na = double.tryParse(pa[0]) ?? 0.0;
-  final nb = double.tryParse(pb[0]) ?? 0.0;
-  final cmp = na.compareTo(nb);
-  if (cmp != 0) return cmp;
-  return a.compareTo(b);
 }

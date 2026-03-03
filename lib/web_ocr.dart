@@ -1,52 +1,89 @@
-// Web-specific OCR helpers.  Since ML Kit text recognition does not
-// currently support Flutter Web, the easiest cross-browser path is to
-// leverage a JavaScript library such as tesseract.js via `dart:js` or the
-// `js` package.  Another option is to write a small JS snippet that calls
-// the modern `OCR` Web API when it lands, but that is not widely available
-// yet.
-//
-// The code below is only a skeleton; it shows how you might take a video
-// frame, draw it into a canvas, crop to the ROI defined by our scan guide,
-// and hand the resulting image data off to tesseract.js.  You would need to
-// add `web/index.html` script tags to import tesseract.js and use
-// `@JS()` extern declarations to call it.
+// Web-specific OCR helpers interface.
+// Uses conditional imports to load the correct implementation.
 
-import 'dart:html' as html;
-import 'dart:ui' as ui;
+import 'web_ocr_stub.dart' if (dart.library.html) 'web_ocr_web.dart' as impl;
 
-/// Represents a bounding box within the video element in pixel coordinates.
-class BoundingBox {
-  final double left, top, width, height;
-  BoundingBox(this.left, this.top, this.width, this.height);
+/// Finds the video element on the page, captures a frame, crops it,
+/// and runs OCR on it. Returns empty list on non-web platforms.
+Future<List<OcrResult>> recognizeWebVideo() => impl.recognizeWebVideo();
+
+/// A minimal data class representing a single recognized text block along
+/// with its approximate x/y position inside the source image.  Only the x
+/// coordinate is currently used for sorting, but the full box is preserved
+/// for possible future use.
+class OcrResult {
+  final String text;
+  final double x;
+  final double y;
+  final double width;
+  final double height;
+
+  OcrResult(this.text, this.x, this.y, this.width, this.height);
+
+  @override
+  String toString() => 'OcrResult(text: "$text", x: $x)';
 }
 
-/// Captures the current frame from [videoElement], crops to [box], and
-/// returns the raw image data as a `Blob` (or `Uint8List`).
-Future<html.Blob> captureCroppedFrame(html.VideoElement videoElement, BoundingBox box) async {
-  final canvas = html.CanvasElement(width: box.width.toInt(), height: box.height.toInt());
-  final ctx = canvas.context2D;
-  ctx.drawImageScaledFromSource(videoElement, box.left, box.top, box.width, box.height, 0, 0, box.width, box.height);
-  final blob = await canvas.toBlob('image/png');
-  if (blob == null) throw StateError('Unable to capture frame');
-  return blob;
-}
-
-/// Example stub showing how you might call a JS function provided by
-/// tesseract.js (assumes `window.recognizeImage` is defined in your HTML).
-Future<String> recognizeText(html.Blob imageBlob) async {
-  // Use package:js or dart:js to interop with tesseract.js.  For instance:
-  //
-  // @JS('recognizeImage')
-  // external Promise<String> _jsRecognize(ImageData data);
-  //
-  // final text = await promiseToFuture<String>(_jsRecognize(...));
-  //
-  // Here we simply return an empty string for the prototype.
-  return Future.value('');
+/// Normalizes common OCR confusion pairs within the numeric prefix of a call
+/// number.  Only characters occurring before the first hyphen are adjusted.
+String _correctConfusions(String s) {
+  final m = RegExp(r'^([0-9OIl]+)').firstMatch(s);
+  if (m != null) {
+    final prefix = m.group(1)!;
+    final corrected = prefix
+        .replaceAll('O', '0')
+        .replaceAll(RegExp(r'[Il]'), '1');
+    return corrected + s.substring(prefix.length);
+  }
+  return s;
 }
 
 /// Filters OCR result lines using the KDC pattern and returns the subset
 /// that matches.  (Could also return bounding boxes to feed into ordering.)
+// KDC call number regex used by both web helpers and main logic.
+// NOTE: OCR often injects spaces or weird characters between parts of the
+// call number, so we normalize by removing whitespace and certain symbols
+// before applying the regex.  We also keep the original line for debugging.
+//
+// KDC pattern: up to 3‑digit (or more) numeric classification with optional
+// decimal, then a hyphen, a single Korean character, 2–3 digits, another
+// hyphen, and a final Korean consonant or alphanumeric suffix.
+final RegExp kdcRegex = RegExp(
+  r"^\d{1,3}(?:\.\d+)?-[가-힣]\d{2,3}-[가-힣ㄱ-ㅎ\w\.]+",
+);
+
+/// Attempts to parse a line into a KDC call number by extracting
+/// its numeric, Korean-author, and trailing components.  This is more
+/// permissive than simple regex matching and tolerates noise characters.
+String? _extractCallNumber(String line) {
+  // apply character‑confusion corrections before we try to parse
+  line = _correctConfusions(line);
+  // numeric prefix (allow more than 3 digits if noise)
+  final numMatch = RegExp(r"\d+(?:\.\d+)?").firstMatch(line);
+  if (numMatch == null) return null;
+  final num = numMatch.group(0)!;
+  // korean author character + 2–3 digits
+  final korMatch = RegExp(r"[가-힣]\s*\d{2,3}").firstMatch(line);
+  if (korMatch == null) return null;
+  final kor = korMatch.group(0)!.replaceAll(RegExp(r"\s+"), "");
+  // trailing part (e.g., v.2, or letter code)
+  // look after the korean match
+  final after = line.substring(korMatch.end);
+  final trailMatch = RegExp(r"[A-Za-z0-9\.]+?").firstMatch(after);
+  final trail = trailMatch?.group(0) ?? '';
+  final candidate = '$num-$kor${trail.isNotEmpty ? '-$trail' : ''}';
+  // final normalize: remove whitespace
+  return candidate.replaceAll(RegExp(r"\s+"), "");
+}
+
+/// Returns normalized call numbers extracted from [lines].
 List<String> filterKdc(List<String> lines) {
-  return lines.where((l) => kdcRegex.hasMatch(l)).toList();
+  final List<String> results = [];
+  for (final line in lines) {
+    final parsed = _extractCallNumber(line);
+    if (parsed != null && kdcRegex.hasMatch(parsed)) {
+      results.add(parsed);
+    }
+  }
+  return results;
 }
