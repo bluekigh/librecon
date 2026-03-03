@@ -43,6 +43,8 @@ jobs:
           git add build_version.txt
           git commit -m "Bump build version to ${{ steps.version.outputs.number }} [skip ci]" || echo "no change"
           git push origin HEAD:main
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build web
         run: flutter build web --base-href "/librecon/" --dart-define=BUILD_VERSION=${{ steps.version.outputs.number }}
