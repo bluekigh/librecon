@@ -42,7 +42,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add build_version.txt
           git commit -m "Bump build version to ${{ steps.version.outputs.number }} [skip ci]" || echo "no change"
-          git push origin HEAD:main
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/bluekigh/librecon.git HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -61,6 +61,6 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add -f docs
           git commit -m "Deploy web to docs [skip ci]" || echo "nothing to commit"
-          git push origin HEAD:main
+          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/bluekigh/librecon.git HEAD:main
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
