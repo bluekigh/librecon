@@ -22,9 +22,11 @@ class ScannerScreen extends StatefulWidget {
   State<ScannerScreen> createState() => _ScannerScreenState();
 }
 
-class _ScannerScreenState extends State<ScannerScreen> {
+class _ScannerScreenState extends State<ScannerScreen>
+    with SingleTickerProviderStateMixin {
   CameraController? _controller;
   Future<void>? _initializeControllerFuture;
+  AnimationController? _animationController;
 
   // 인식된 텍스트 라인들을 저장
   final List<String> _recognizedLines = [];
@@ -32,11 +34,8 @@ class _ScannerScreenState extends State<ScannerScreen> {
   String _lastRawText = '';
   Timer? _ocrTimer;
   String _ocrStatus = '대기 중';
-  // 빌드 버전 - dart define으로 주입됨
-  static const String buildVersion = String.fromEnvironment(
-    'BUILD_VERSION',
-    defaultValue: '0',
-  );
+  bool _isProcessing = false; // OCR 처리 중복 방지 플래그
+  static const String appVersion = "v0.02";
 
   @override
   void initState() {
@@ -46,9 +45,18 @@ class _ScannerScreenState extends State<ScannerScreen> {
     // preview and overlays adapt automatically.
 
     _initCamera();
+
+    _animationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 1),
+    )..addListener(() {
+        setState(() {});
+      });
+
     // 주기적으로 OCR 처리
-    _ocrTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
-      if (mounted) {
+    _ocrTimer = Timer.periodic(const Duration(milliseconds: 1000), (_) {
+      if (mounted && !_isProcessing) {
+        _animationController?.forward(from: 0);
         _performOcr();
       }
     });
@@ -127,12 +135,15 @@ class _ScannerScreenState extends State<ScannerScreen> {
   void dispose() {
     _ocrTimer?.cancel();
     _controller?.dispose();
+    _animationController?.dispose();
     super.dispose();
   }
 
   // placeholder for future OCR capture logic
   Future<void> _performOcr() async {
+    if (_isProcessing) return;
     setState(() {
+      _isProcessing = true;
       _ocrStatus = '인식 중...';
     });
 
@@ -151,6 +162,10 @@ class _ScannerScreenState extends State<ScannerScreen> {
         print('cropped size: ${cropped.lengthInBytes} bytes');
       } catch (e) {
         setState(() => _ocrStatus = '오류');
+      } finally {
+        if(mounted) {
+          setState(() => _isProcessing = false);
+        }
       }
       return;
     }
@@ -176,6 +191,10 @@ class _ScannerScreenState extends State<ScannerScreen> {
       });
     } catch (e) {
       setState(() => _ocrStatus = '오류');
+    } finally {
+      if (mounted) {
+        setState(() => _isProcessing = false);
+      }
     }
   }
 
@@ -203,6 +222,18 @@ class _ScannerScreenState extends State<ScannerScreen> {
 
             // overlay with transparent window (using CustomPainter for flexibility)
             CustomPaint(painter: ScanGuidePainter()),
+            // visual timer
+            if (_animationController != null)
+              Positioned(
+                top: (MediaQuery.of(context).size.height - 150) / 2 - 8,
+                left: MediaQuery.of(context).size.width * 0.1,
+                width: MediaQuery.of(context).size.width * 0.8,
+                child: LinearProgressIndicator(
+                  value: _animationController!.value,
+                  backgroundColor: Colors.transparent,
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.green),
+                ),
+              ),
             // status line
             Positioned(
               left: 0,
@@ -249,29 +280,17 @@ class _ScannerScreenState extends State<ScannerScreen> {
                   ),
                 ),
               ),
-            // always show raw text in small overlay bottom-right (even empty)
-            Positioned(
-              right: 4,
-              bottom: 4,
-              child: Container(
-                color: Colors.black45,
-                padding: const EdgeInsets.all(4),
-                child: Text(
-                  'Raw: $_lastRawText',
-                  style: const TextStyle(color: Colors.white70, fontSize: 10),
-                ),
-              ),
-            ),
+
             // build version badge
             Positioned(
               right: 8,
-              top: 8,
+              bottom: 8,
               child: Container(
                 color: Colors.black45,
                 padding: const EdgeInsets.all(4),
-                child: Text(
-                  'v${buildVersion}',
-                  style: const TextStyle(color: Colors.white70, fontSize: 10),
+                child: const Text(
+                  appVersion,
+                  style: TextStyle(color: Colors.white70, fontSize: 10),
                 ),
               ),
             ),
