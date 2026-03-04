@@ -1,66 +1,37 @@
-name: Build and Deploy Web
+name: Deploy Web to GitHub Pages
 
 on:
   push:
     branches:
       - main
 
+# GitHub Pages 배포를 위한 권한 설정
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# 동시 배포 제어
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
 jobs:
-  build:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v3
+      - name: Setup Pages
+        uses: actions/configure-pages@v3
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v2
         with:
-          persist-credentials: false # do not store GITHUB_TOKEN in git config
-          fetch-depth: 0
-
-      - name: Set up Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-
-      - name: Install dependencies
-        run: flutter pub get
-
-      - name: Determine build version
-        id: version
-        run: |
-          if [ -f build_version.txt ]; then
-            ver=$(cat build_version.txt)
-          else
-            ver=0
-          fi
-          new=$((ver+1))
-          echo $new > build_version.txt
-          echo "::set-output name=number::$new"
-
-      - name: Commit version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add build_version.txt
-          git commit -m "Bump build version to ${{ steps.version.outputs.number }} [skip ci]" || echo "no change"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/bluekigh/librecon.git HEAD:main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build web
-        run: flutter build web --base-href "/librecon/" --dart-define=BUILD_VERSION=${{ steps.version.outputs.number }}
-
-      - name: Copy build to docs
-        run: |
-          rm -rf docs
-          mkdir docs
-          cp -r build/web/* docs/
-
-      - name: Commit and push docs
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f docs
-          git commit -m "Deploy web to docs [skip ci]" || echo "nothing to commit"
-          git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/bluekigh/librecon.git HEAD:main
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 로컬에서 빌드하여 'docs' 디렉토리에 위치한 파일을 업로드합니다.
+          path: './docs'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v2
