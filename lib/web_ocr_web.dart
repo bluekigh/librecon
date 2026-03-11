@@ -95,19 +95,32 @@ void _preprocessCanvas(
     data[i] = data[i + 1] = data[i + 2] = v;
   }
 
-  // sharpening kernel: [[0,-1,0],[-1,5,-1],[0,-1,0]]
+  // sharpening
   final copy = Uint8ClampedList.fromList(data);
-  for (int y = 1; y < height - 1; y++) {
-    for (int x = 1; x < width - 1; x++) {
-      final idx = (y * width + x) * 4;
-      int sum = 0;
-      sum += -copy[idx - width * 4]; // above
-      sum += -copy[idx - 4]; // left
-      sum += 5 * copy[idx]; // center
-      sum += -copy[idx + 4]; // right
-      sum += -copy[idx + width * 4]; // below
-      final val = sum.clamp(0, 255).toInt();
-      data[idx] = data[idx + 1] = data[idx + 2] = val;
+  const int kernelSize = 3;
+  const List<double> kernel = [0, -1, 0, -1, 5, -1, 0, -1, 0]; // Sharpen
+  final int halfKernelSize = kernelSize ~/ 2;
+
+  for (int y = halfKernelSize; y < height - halfKernelSize; y++) {
+    for (int x = halfKernelSize; x < width - halfKernelSize; x++) {
+      double sumR = 0, sumG = 0, sumB = 0;
+      for (int ky = -halfKernelSize; ky <= halfKernelSize; ky++) {
+        for (int kx = -halfKernelSize; kx <= halfKernelSize; kx++) {
+          final int pixelY = y + ky;
+          final int pixelX = x + kx;
+          final int kernelIndex = (ky + halfKernelSize) * kernelSize + (kx + halfKernelSize);
+          final double kernelValue = kernel[kernelIndex];
+          
+          final int pixelIndex = (pixelY * width + pixelX) * 4;
+          sumR += copy[pixelIndex] * kernelValue;
+          sumG += copy[pixelIndex + 1] * kernelValue;
+          sumB += copy[pixelIndex + 2] * kernelValue;
+        }
+      }
+      final int newIndex = (y * width + x) * 4;
+      data[newIndex] = sumR.clamp(0, 255).toInt();
+      data[newIndex + 1] = sumG.clamp(0, 255).toInt();
+      data[newIndex + 2] = sumB.clamp(0, 255).toInt();
     }
   }
 
