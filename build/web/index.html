@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="A new Flutter project.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="librecon">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>librecon</title>
+  <link rel="manifest" href="manifest.json">
+</head>
+<body>
+  <!-- include tesseract.js from CDN for OCR (optional) -->
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+  <script>
+    // placeholder JS interop: accepts Blob and returns recognized text
+    // [blob, options] where options may contain a `whitelist` string that
+    // is applied to tessedit_char_whitelist.  This lets us bias the engine
+    // toward digits/uppercase letters when scanning sans‑serif labels.
+    window.recognizeImage = async function(blob, options = {}) {
+      console.log('recognizeImage called', options);
+      if (typeof Tesseract !== 'undefined') {
+        console.log('Tesseract available, starting recognition');
+        try {
+          const config = {};
+          if (options.whitelist) {
+            config.tessedit_char_whitelist = options.whitelist;
+          }
+          const { data: { text } } = await Tesseract.recognize(blob, 'kor+eng', config);
+          console.log('OCR result:', text);
+          return text;
+        } catch (err) {
+          console.error('OCR error', err);
+          return '';
+        }
+      }
+      console.warn('Tesseract not loaded');
+      return '';
+    };
+
+    // split the image blob vertically into `parts` pieces and run OCR on each.
+    // returns an array of text strings in order.
+    window.recognizeImageSegments = async function(blob, parts, options = {}) {
+      if (typeof Tesseract === 'undefined') {
+        console.warn('Tesseract not loaded (segments)');
+        return [];
+      }
+      const img = await createImageBitmap(blob);
+      const { width, height } = img;
+      const segmentWidth = Math.floor(width / parts);
+      const records = [];
+      const canvas = new OffscreenCanvas(segmentWidth, height);
+      const ctx = canvas.getContext('2d');
+      for (let i = 0; i < parts; i++) {
+        ctx.clearRect(0, 0, segmentWidth, height);
+        ctx.drawImage(img, i * segmentWidth, 0, segmentWidth, height, 0, 0, segmentWidth, height);
+        const segBlob = await canvas.convertToBlob({ type: 'image/png' });
+        try {
+          const config = {};
+          if (options.whitelist) config.tessedit_char_whitelist = options.whitelist;
+          const { data } = await Tesseract.recognize(segBlob, 'kor+eng', config);
+          // each word has a bounding box; record them with global x offset
+          const offset = i * segmentWidth;
+          for (const w of data.words || []) {
+            records.push({
+              text: w.text,
+              x: w.bbox.x0 + offset,
+              y: w.bbox.y0,
+              width: w.bbox.x1 - w.bbox.x0,
+              height: w.bbox.y1 - w.bbox.y0,
+            });
+          }
+        } catch (e) {
+          console.error('segment OCR error', e);
+        }
+      }
+      // sort by x coordinate so that left‑to‑right ordering is preserved
+      records.sort((a, b) => a.x - b.x);
+      return records;
+    };
+  </script>
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>
